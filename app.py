@@ -21,9 +21,12 @@ def load_data():
     claims = pd.read_csv(
         "https://drive.google.com/uc?export=download&id=1SgsAesNi3SHouEtESiNnhY0KdFkvXsr9"
     )
-    transactions = pd.read_csv(
+        transactions = pd.read_csv(
         "https://drive.google.com/uc?export=download&id=1CXiodxDFeTDxGc0iyIovXY2BDekHtKtd"
     )
+    # convert FROMDATE to datetime for date filtering
+    transactions["FROMDATE"] = pd.to_datetime(transactions["FROMDATE"])
+
 
     # Create a single STATUS column (use patient status)
     claims["STATUS"] = claims["STATUSP"]
@@ -177,8 +180,78 @@ with tabs[2]:
 # ------------------------------------------------------------------
 # CLAIMS TAB
 # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# CLAIMS TAB
+# ------------------------------------------------------------------
 with tabs[3]:
-    st.subheader("Review claims status and payer details.")
+    st.subheader("Review claims status, financial exposure, and payer details.")
+
+    # ---------- Financial Exposure (top section) ----------
+    st.markdown("### Total Financial Exposure")
+
+    # figure out sensible default range = last 10 years
+    min_tx = transactions["FROMDATE"].min()
+    max_tx = transactions["FROMDATE"].max()
+
+    ten_years_ago = max_tx - pd.DateOffset(years=10)
+    default_start = max(min_tx, ten_years_ago)
+
+    min_date = min_tx.date()
+    max_date = max_tx.date()
+    default_start_date = default_start.date()
+
+    date_range = st.date_input(
+        "Filter by Service Date (Last 10 Years)",
+        value=(default_start_date, max_date),
+        min_value=min_date,
+        max_value=max_date,
+    )
+
+    # date_input for range returns a tuple
+    if isinstance(date_range, tuple):
+        start_date, end_date = date_range
+    else:
+        start_date, end_date = date_range, max_date
+
+    mask = (transactions["FROMDATE"].dt.date >= start_date) & (
+        transactions["FROMDATE"].dt.date <= end_date
+    )
+    tx_filtered = transactions[mask].copy()
+
+    # group by service date and sum AMOUNT
+    exposure_by_date = (
+        tx_filtered.assign(ServiceDate=tx_filtered["FROMDATE"].dt.date)
+        .groupby("ServiceDate", as_index=False)["AMOUNT"]
+        .sum()
+    )
+
+    if not exposure_by_date.empty:
+        fig_exposure = px.line(
+            exposure_by_date,
+            x="ServiceDate",
+            y="AMOUNT",
+            title="Total Financial Exposure over Time",
+            labels={
+                "ServiceDate": "Service Date",
+                "AMOUNT": "Exposure (Sum of AMOUNT)",
+            },
+        )
+        st.plotly_chart(fig_exposure, use_container_width=True)
+    else:
+        st.info("No transactions found in this date range.")
+
+    total_exposure = tx_filtered["AMOUNT"].sum()
+    st.markdown(
+        f"**Total Exposure in selected period:** ${total_exposure:,.2f}"
+    )
+    st.caption(
+        "Exposure = Sum of AMOUNT from claims_transactions_filtered for filtered claim lines."
+    )
+
+    st.markdown("---")
+
+    # ---------- Existing claims status / payer filters (bottom section) ----------
+    st.subheader("Claims by Status and Payer")
 
     status_list = claims["STATUS"].dropna().unique()
     payer_list = claims["PAYER"].dropna().unique()
@@ -216,6 +289,7 @@ with tabs[3]:
         kpi_card("Claims", total_claims, "#f7d42e")
     with col4:
         kpi_card("Payers", total_payers, "#f72e2e")
+
 
 # ------------------------------------------------------------------
 # DENIAL REASONS TAB (ILLUSTRATIVE)
