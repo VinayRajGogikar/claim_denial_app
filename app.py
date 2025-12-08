@@ -2,224 +2,342 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# ----------------------------
-# PAGE CONFIG
-# ----------------------------
 st.set_page_config(
     page_title="Real-Time Insurance Claim Denial Prediction",
     layout="wide"
 )
 
-# ----------------------------
-# LOAD DATA
-# ----------------------------
+# ------------------------------------------------------------------
+# DATA LOADING
+# ------------------------------------------------------------------
 @st.cache_data
 def load_data():
-    # Small files from GitHub repo
+    # Local CSVs from your GitHub repo (in /data folder)
     patients = pd.read_csv("data/patients_filtered.csv")
     encounters = pd.read_csv("data/encounters_filtered.csv")
     payer_trans = pd.read_csv("data/payer_transitions_filtered.csv")
 
-    # CLAIMS file (46 MB) from Google Drive
+    # Claims + transactions from Google Drive
     claims = pd.read_csv(
         "https://drive.google.com/uc?export=download&id=1SgsAesNi3SHouEtESiNnhY0KdFkvXsr9"
     )
-
-    # TRANSACTIONS file (500 MB) from Google Drive
     transactions = pd.read_csv(
         "https://drive.google.com/uc?export=download&id=1CXiodxDFeTDxGc0iyIovXY2BDekHtKtd"
     )
+
+    # Create a single STATUS column (use patient status)
+    claims["STATUS"] = claims["STATUSP"]
+
+    # Attach a payer to each claim:
+    # take the latest payer row per patient from payer_transitions
+    latest_payer = (
+        payer_trans.sort_values("START_DATE")
+        .drop_duplicates("PATIENT", keep="last")[["PATIENT", "PAYER"]]
+    )
+    claims = claims.merge(
+        latest_payer, left_on="PATIENTID", right_on="PATIENT", how="left"
+    )
+
+    # Simple proxy for "denied": any positive outstanding patient balance
+    claims["DENIED"] = claims["OUTSTANDINGP"] > 0
 
     return patients, encounters, claims, transactions, payer_trans
 
 
 patients, encounters, claims, transactions, payer_trans = load_data()
 
-# ----------------------------
-# KPI NUMBERS
-# ----------------------------
-total_patients = len(patients)
-total_encounters = len(encounters)
-total_claims = len(claims)
-total_payers = claims["PAYERID"].nunique()
-
-
-# ----------------------------
-# KPI CARD FUNCTION
-# ----------------------------
+# ------------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------------
 def kpi_card(label, value, color):
     st.markdown(
         f"""
-        <div style="background:white; border-radius:10px; padding:20px; 
+        <div style="background:white; border-radius:10px; padding:20px;
              border:2px solid {color}; text-align:center; width:100%;">
             <h3 style="color:black;">{label}</h3>
             <h1 style="color:{color};">{value}</h1>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
-# ----------------------------
-# TABS
-# ----------------------------
-tabs = st.tabs(["Overview", "Patients", "Encounters", "Claims",
-                "Denial Reasons", "Payers", "Predict Denial"])
+
+def compute_payer_denial_rate(claims_df, payer_id: str) -> float:
+    """Percent of claims for this payer that we treat as denied."""
+    subset = claims_df[claims_df["PAYER"] == payer_id]
+    if len(subset) == 0:
+        return 0.0
+    return float(subset["DENIED"].mean() * 100.0)
 
 
-# ============================================================
-# 1. OVERVIEW TAB
-# ============================================================
+# ------------------------------------------------------------------
+# KPIs
+# ------------------------------------------------------------------
+total_patients = len(patients)
+total_encounters = len(encounters)
+total_claims = len(claims)
+total_payers = claims["PAYER"].nunique()
+
+tabs = st.tabs(
+    [
+        "Overview",
+        "Patients",
+        "Encounters",
+        "Claims",
+        "Denial Reasons",
+        "Payers",
+        "Predict Denial",
+    ]
+)
+
+# ------------------------------------------------------------------
+# OVERVIEW TAB
+# ------------------------------------------------------------------
 with tabs[0]:
-    st.subheader("Overview: Use the tabs above to explore claims, denial reasons, patients, and payers.")
+    st.subheader(
+        "Overview: Use the tabs above to explore claims, denial reasons, patients, and payers."
+    )
 
     col1, col2, col3, col4 = st.columns(4)
-    with col1: kpi_card("Patients", total_patients, "#2e8ef7")
-    with col2: kpi_card("Encounters", total_encounters, "#3d2ef7")
-    with col3: kpi_card("Claims", total_claims, "#f7d42e")
-    with col4: kpi_card("Payers", total_payers, "#f72e2e")
+    with col1:
+        kpi_card("Patients", total_patients, "#2e8ef7")
+    with col2:
+        kpi_card("Encounters", total_encounters, "#3d2ef7")
+    with col3:
+        kpi_card("Claims", total_claims, "#f7d42e")
+    with col4:
+        kpi_card("Payers", total_payers, "#f72e2e")
 
-
-# ============================================================
-# 2. PATIENTS TAB
-# ============================================================
+# ------------------------------------------------------------------
+# PATIENTS TAB
+# ------------------------------------------------------------------
 with tabs[1]:
     st.subheader("View and analyze the distribution of patients by gender and birthdate.")
-    gender = st.selectbox("Filter by Gender", ["All"] + sorted(patients["GENDER"].dropna().unique().tolist()))
 
-    df = patients.copy()
+    gender = st.selectbox(
+        "Filter by Gender",
+        ["All"] + sorted(patients["GENDER"].dropna().unique().tolist()),
+    )
+
+    df_pat = patients.copy()
     if gender != "All":
-        df = df[df["GENDER"] == gender]
+        df_pat = df_pat[df_pat["GENDER"] == gender]
 
-    fig = px.histogram(df, x="BIRTHDATE", color="GENDER", barmode="stack",
-                       title="Patients by Birthdate")
+    fig = px.histogram(
+        df_pat,
+        x="BIRTHDATE",
+        color="GENDER",
+        barmode="stack",
+        title="Patients by Birthdate",
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     col1, col2, col3, col4 = st.columns(4)
-    with col1: kpi_card("Patients", total_patients, "#2e8ef7")
-    with col2: kpi_card("Encounters", total_encounters, "#3d2ef7")
-    with col3: kpi_card("Claims", total_claims, "#f7d42e")
-    with col4: kpi_card("Payers", total_payers, "#f72e2e")
+    with col1:
+        kpi_card("Patients", total_patients, "#2e8ef7")
+    with col2:
+        kpi_card("Encounters", total_encounters, "#3d2ef7")
+    with col3:
+        kpi_card("Claims", total_claims, "#f7d42e")
+    with col4:
+        kpi_card("Payers", total_payers, "#f72e2e")
 
-
-# ============================================================
-# 3. ENCOUNTERS TAB
-# ============================================================
+# ------------------------------------------------------------------
+# ENCOUNTERS TAB
+# ------------------------------------------------------------------
 with tabs[2]:
     st.subheader("View encounter breakdown and class filters.")
 
-    classes = encounters["CLASS"].dropna().unique()
-    selected_class = st.selectbox("Filter by Encounter Class", ["All"] + sorted(classes))
+    enc_classes = encounters["ENCOUNTERCLASS"].dropna().unique()
+    selected_class = st.selectbox(
+        "Filter by Encounter Class", ["All"] + sorted(enc_classes.tolist())
+    )
 
-    df = encounters.copy()
+    df_enc = encounters.copy()
     if selected_class != "All":
-        df = df[df["CLASS"] == selected_class]
+        df_enc = df_enc[df_enc["ENCOUNTERCLASS"] == selected_class]
 
-    fig = px.histogram(df, x="CLASS", title="Encounters by Class")
+    fig = px.histogram(
+        df_enc,
+        x="ENCOUNTERCLASS",
+        title="Encounters by Class",
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     col1, col2, col3, col4 = st.columns(4)
-    with col1: kpi_card("Patients", total_patients, "#2e8ef7")
-    with col2: kpi_card("Encounters", total_encounters, "#3d2ef7")
-    with col3: kpi_card("Claims", total_claims, "#f7d42e")
-    with col4: kpi_card("Payers", total_payers, "#f72e2e")
+    with col1:
+        kpi_card("Patients", total_patients, "#2e8ef7")
+    with col2:
+        kpi_card("Encounters", total_encounters, "#3d2ef7")
+    with col3:
+        kpi_card("Claims", total_claims, "#f7d42e")
+    with col4:
+        kpi_card("Payers", total_payers, "#f72e2e")
 
-
-# ============================================================
-# 4. CLAIMS TAB
-# ============================================================
+# ------------------------------------------------------------------
+# CLAIMS TAB
+# ------------------------------------------------------------------
 with tabs[3]:
     st.subheader("Review claims status and payer details.")
 
     status_list = claims["STATUS"].dropna().unique()
-    payers_list = claims["PAYERID"].dropna().unique()
+    payer_list = claims["PAYER"].dropna().unique()
 
-    status_sel = st.selectbox("Filter by Claim Status", ["All"] + sorted(status_list))
-    payer_sel = st.selectbox("Filter by Payer", ["All"] + sorted(payers_list))
+    status_sel = st.selectbox(
+        "Filter by Claim Status", ["All"] + sorted(status_list.tolist())
+    )
+    payer_sel = st.selectbox(
+        "Filter by Payer", ["All"] + sorted(payer_list.tolist())
+    )
 
-    df = claims.copy()
+    df_clm = claims.copy()
     if status_sel != "All":
-        df = df[df["STATUS"] == status_sel]
+        df_clm = df_clm[df_clm["STATUS"] == status_sel]
     if payer_sel != "All":
-        df = df[df["PAYERID"] == payer_sel]
+        df_clm = df_clm[df_clm["PAYER"] == payer_sel]
 
-    fig = px.histogram(df, x="STATUS", title="Claims by Status", color="STATUS")
+    fig = px.histogram(
+        df_clm,
+        x="STATUS",
+        title="Claims by Status",
+        color="STATUS",
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     st.write("Filtered Claims Table")
-    st.dataframe(df.head(200))
+    st.dataframe(df_clm.head(200))
 
     col1, col2, col3, col4 = st.columns(4)
-    with col1: kpi_card("Patients", total_patients, "#2e8ef7")
-    with col2: kpi_card("Encounters", total_encounters, "#3d2ef7")
-    with col3: kpi_card("Claims", total_claims, "#f7d42e")
-    with col4: kpi_card("Payers", total_payers, "#f72e2e")
+    with col1:
+        kpi_card("Patients", total_patients, "#2e8ef7")
+    with col2:
+        kpi_card("Encounters", total_encounters, "#3d2ef7")
+    with col3:
+        kpi_card("Claims", total_claims, "#f7d42e")
+    with col4:
+        kpi_card("Payers", total_payers, "#f72e2e")
 
-
-# ============================================================
-# 5. DENIAL REASONS TAB
-# ============================================================
+# ------------------------------------------------------------------
+# DENIAL REASONS TAB (ILLUSTRATIVE)
+# ------------------------------------------------------------------
 with tabs[4]:
-    st.subheader("Explore top denial reasons.")
+    st.subheader("Explore top denial reasons (illustrative example).")
 
-    fig = px.histogram(claims, x="DENIAL_REASON", title="Most Frequent Denial Reasons",
-                       color="DENIAL_REASON")
-    st.plotly_chart(fig, use_container_width=True)
+    denial_reasons = [
+        "Incorrect billing / service excluded",
+        "Duplicate claims / administrative",
+        "Incorrect submission / missing info",
+        "Medical claim issues",
+        "Ineligibility / coverage expired",
+        "Partial denials",
+        "Authorization missing",
+        "Out of network provider",
+        "Other",
+    ]
+    counts = [7428, 6105, 6064, 5236, 4116, 3354, 1602, 1319, 670]
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1: kpi_card("Patients", total_patients, "#2e8ef7")
-    with col2: kpi_card("Encounters", total_encounters, "#3d2ef7")
-    with col3: kpi_card("Claims", total_claims, "#f7d42e")
-    with col4: kpi_card("Payers", total_payers, "#f72e2e")
+    denial_df = pd.DataFrame({"Denial Reason": denial_reasons, "Count": counts})
 
-
-# ============================================================
-# 6. PAYERS TAB
-# ============================================================
-with tabs[5]:
-    st.subheader("See distribution of payers involved in claims and transitions.")
-
-    fig = px.histogram(claims, x="PAYERID", title="Payer Distribution")
+    fig = px.bar(
+        denial_df,
+        x="Denial Reason",
+        y="Count",
+        color="Denial Reason",
+        title="Most Frequent Denial Reasons",
+    )
     fig.update_layout(xaxis_tickangle=45)
     st.plotly_chart(fig, use_container_width=True)
 
     col1, col2, col3, col4 = st.columns(4)
-    with col1: kpi_card("Patients", total_patients, "#2e8ef7")
-    with col2: kpi_card("Encounters", total_encounters, "#3d2ef7")
-    with col3: kpi_card("Claims", total_claims, "#f7d42e")
-    with col4: kpi_card("Payers", total_payers, "#f72e2e")
+    with col1:
+        kpi_card("Patients", total_patients, "#2e8ef7")
+    with col2:
+        kpi_card("Encounters", total_encounters, "#3d2ef7")
+    with col3:
+        kpi_card("Claims", total_claims, "#f7d42e")
+    with col4:
+        kpi_card("Payers", total_payers, "#f72e2e")
 
+# ------------------------------------------------------------------
+# PAYERS TAB
+# ------------------------------------------------------------------
+with tabs[5]:
+    st.subheader("See distribution of payers involved in claims.")
 
-# ============================================================
-# 7. PREDICT DENIAL TAB
-# ============================================================
+    fig = px.histogram(
+        claims,
+        x="PAYER",
+        title="Payer Distribution",
+    )
+    fig.update_layout(xaxis_tickangle=45)
+    st.plotly_chart(fig, use_container_width=True)
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        kpi_card("Patients", total_patients, "#2e8ef7")
+    with col2:
+        kpi_card("Encounters", total_encounters, "#3d2ef7")
+    with col3:
+        kpi_card("Claims", total_claims, "#f7d42e")
+    with col4:
+        kpi_card("Payers", total_payers, "#f72e2e")
+
+# ------------------------------------------------------------------
+# PREDICT DENIAL TAB
+# ------------------------------------------------------------------
 with tabs[6]:
     st.subheader("Predict Claim Denial")
 
     col1, col2 = st.columns(2)
 
+    payer_options = sorted(claims["PAYER"].dropna().unique().tolist())
+    denial_reason_options = [
+        "Incorrect billing / service excluded",
+        "Duplicate claims / administrative",
+        "Incorrect submission / missing info",
+        "Medical claim issues",
+        "Ineligibility / coverage expired",
+        "Partial denials",
+        "Authorization missing",
+        "Out of network provider",
+        "Other",
+    ]
+
     with col1:
-        payer = st.selectbox("Select Payer", sorted(claims["PAYERID"].dropna().unique()))
-        encounter_class = st.selectbox("Select Encounter Class", sorted(encounters["CLASS"].dropna().unique()))
+        payer = st.selectbox("Select Payer", payer_options)
+        encounter_class = st.selectbox(
+            "Select Encounter Class",
+            sorted(encounters["ENCOUNTERCLASS"].dropna().unique().tolist()),
+        )
         cost = st.number_input("Procedure Cost", min_value=0, value=100)
 
     with col2:
         age = st.number_input("Patient Age", min_value=0, value=30)
-        reason = st.selectbox("Health Issue / Reason",
-                              sorted(claims["DENIAL_REASON"].dropna().unique()))
+        reason = st.selectbox("Health Issue / Reason", denial_reason_options)
 
     if st.button("Predict Denial"):
+        payer_rate = compute_payer_denial_rate(claims, payer)
 
-        payer_rate = len(claims[(claims["PAYERID"] == payer) & (claims["STATUS"] == "DENIED")]) / \
-                     len(claims[claims["PAYERID"] == payer]) * 100
-
-        threshold = 7.5 + 10
+        # Basic threshold with small adjustments based on cost and age
+        threshold = 5.0
+        if cost > 2000:
+            threshold -= 1.0
+        if age > 65:
+            threshold -= 1.0
 
         prediction = "DENIED" if payer_rate > threshold else "NOT DENIED"
 
-        st.markdown(f"""
-        ### Prediction: **{prediction}**  
-        **Denial Rate: {payer_rate:.1f}%**
-        """)
+        st.markdown(
+            f"""### Prediction: **{prediction}** — Denial Rate: {payer_rate:.1f}%"""
+        )
 
-        st.info("Most frequent denial reasons: Incorrect submission/missing info, Incorrect billing, Coverage expired.")
-        st.warning("Try submitting to a payer with lower denial rate.")
+        st.caption(
+            f"Threshold used: {threshold:.1f}%. Historical denial rate for this payer is "
+            f"{payer_rate:.2f}%, based on claims with any outstanding patient balance."
+        )
+
+        st.info(
+            "Most frequent denial reasons include incorrect submission, "
+            "incorrect billing, and coverage issues. Double-check documentation "
+            "and eligibility before submission."
+        )
