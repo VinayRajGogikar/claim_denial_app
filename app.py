@@ -2,57 +2,90 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
+# -----------------------------------------------------------
+# PAGE CONFIG
+# -----------------------------------------------------------
 st.set_page_config(
     page_title="Real-Time Insurance Claim Denial Prediction",
     layout="wide"
 )
 
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 # DATA LOADING
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 @st.cache_data
 def load_data():
-    # Local CSVs from your GitHub repo (in /data folder)
+    # Local CSVs from GitHub repo
     patients = pd.read_csv("data/patients_filtered.csv")
     encounters = pd.read_csv("data/encounters_filtered.csv")
     payer_trans = pd.read_csv("data/payer_transitions_filtered.csv")
 
-    # Claims + transactions from Google Drive
+    # Big files from Google Drive
     claims = pd.read_csv(
         "https://drive.google.com/uc?export=download&id=1SgsAesNi3SHouEtESiNnhY0KdFkvXsr9"
     )
-        transactions = pd.read_csv(
+    transactions = pd.read_csv(
         "https://drive.google.com/uc?export=download&id=1CXiodxDFeTDxGc0iyIovXY2BDekHtKtd"
     )
-    # convert FROMDATE to datetime for date filtering
-    transactions["FROMDATE"] = pd.to_datetime(transactions["FROMDATE"])
 
+    # ---------- Fix/standardize columns ----------
 
-    # Create a single STATUS column (use patient status)
-    claims["STATUS"] = claims["STATUSP"]
+    # Encounter class: make sure column is ENCOUNTERCLASS
+    if "ENCOUNTERCLASS" not in encounters.columns and "CLASS" in encounters.columns:
+        encounters = encounters.rename(columns={"CLASS": "ENCOUNTERCLASS"})
 
-    # Attach a payer to each claim:
-    # take the latest payer row per patient from payer_transitions
-    latest_payer = (
-        payer_trans.sort_values("START_DATE")
-        .drop_duplicates("PATIENT", keep="last")[["PATIENT", "PAYER"]]
-    )
-    claims = claims.merge(
-        latest_payer, left_on="PATIENTID", right_on="PATIENT", how="left"
-    )
+    # Claims STATUS column
+    if "STATUS" not in claims.columns:
+        if "STATUSP" in claims.columns:
+            claims["STATUS"] = claims["STATUSP"]
+        elif "STATUS1" in claims.columns:
+            claims["STATUS"] = claims["STATUS1"]
+        else:
+            claims["STATUS"] = "UNKNOWN"
 
-    # Simple proxy for "denied": any positive outstanding patient balance
-    claims["DENIED"] = claims["OUTSTANDINGP"] > 0
+    # Simple DENIED flag based on patient outstanding balance
+    if "OUTSTANDINGP" in claims.columns:
+        claims["DENIED"] = claims["OUTSTANDINGP"] > 0
+    else:
+        claims["DENIED"] = False
+
+    # Attach payer from payer_transitions (latest payer per patient)
+    if (
+        "PATIENTID" in claims.columns
+        and "PATIENT" in payer_trans.columns
+        and "PAYER" in payer_trans.columns
+    ):
+        pt_sorted = payer_trans.copy()
+        if "START_DATE" in pt_sorted.columns:
+            pt_sorted["START_DATE"] = pd.to_datetime(
+                pt_sorted["START_DATE"], errors="coerce"
+            )
+            pt_sorted = pt_sorted.sort_values("START_DATE")
+        latest_payer = pt_sorted.drop_duplicates("PATIENT", keep="last")[
+            ["PATIENT", "PAYER"]
+        ]
+        claims = claims.merge(
+            latest_payer, left_on="PATIENTID", right_on="PATIENT", how="left"
+        )
+    if "PAYER" not in claims.columns:
+        claims["PAYER"] = "Unknown"
+
+    # Parse FROMDATE in transactions for date filtering
+    if "FROMDATE" in transactions.columns:
+        transactions["FROMDATE"] = pd.to_datetime(
+            transactions["FROMDATE"], errors="coerce"
+        )
 
     return patients, encounters, claims, transactions, payer_trans
 
 
 patients, encounters, claims, transactions, payer_trans = load_data()
 
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 # HELPERS
-# ------------------------------------------------------------------
-def kpi_card(label, value, color):
+# -----------------------------------------------------------
+def kpi_card(label: str, value, color: str) -> None:
+    """Simple KPI card."""
     st.markdown(
         f"""
         <div style="background:white; border-radius:10px; padding:20px;
@@ -65,17 +98,17 @@ def kpi_card(label, value, color):
     )
 
 
-def compute_payer_denial_rate(claims_df, payer_id: str) -> float:
-    """Percent of claims for this payer that we treat as denied."""
+def compute_payer_denial_rate(claims_df: pd.DataFrame, payer_id: str) -> float:
+    """Percent of claims for this payer that are marked as DENIED."""
     subset = claims_df[claims_df["PAYER"] == payer_id]
     if len(subset) == 0:
         return 0.0
     return float(subset["DENIED"].mean() * 100.0)
 
 
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 # KPIs
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 total_patients = len(patients)
 total_encounters = len(encounters)
 total_claims = len(claims)
@@ -93,9 +126,9 @@ tabs = st.tabs(
     ]
 )
 
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 # OVERVIEW TAB
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 with tabs[0]:
     st.subheader(
         "Overview: Use the tabs above to explore claims, denial reasons, patients, and payers."
@@ -111,9 +144,9 @@ with tabs[0]:
     with col4:
         kpi_card("Payers", total_payers, "#f72e2e")
 
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 # PATIENTS TAB
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 with tabs[1]:
     st.subheader("View and analyze the distribution of patients by gender and birthdate.")
 
@@ -145,9 +178,9 @@ with tabs[1]:
     with col4:
         kpi_card("Payers", total_payers, "#f72e2e")
 
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 # ENCOUNTERS TAB
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 with tabs[2]:
     st.subheader("View encounter breakdown and class filters.")
 
@@ -177,81 +210,81 @@ with tabs[2]:
     with col4:
         kpi_card("Payers", total_payers, "#f72e2e")
 
-# ------------------------------------------------------------------
-# CLAIMS TAB
-# ------------------------------------------------------------------
-# ------------------------------------------------------------------
-# CLAIMS TAB
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
+# CLAIMS TAB  (includes Total Financial Exposure chart)
+# -----------------------------------------------------------
 with tabs[3]:
     st.subheader("Review claims status, financial exposure, and payer details.")
 
-    # ---------- Financial Exposure (top section) ----------
+    # ---------- Top: Financial exposure ----------
     st.markdown("### Total Financial Exposure")
 
-    # figure out sensible default range = last 10 years
-    min_tx = transactions["FROMDATE"].min()
-    max_tx = transactions["FROMDATE"].max()
+    # Use only valid dates
+    tx_valid = transactions.dropna(subset=["FROMDATE"]).copy()
 
-    ten_years_ago = max_tx - pd.DateOffset(years=10)
-    default_start = max(min_tx, ten_years_ago)
-
-    min_date = min_tx.date()
-    max_date = max_tx.date()
-    default_start_date = default_start.date()
-
-    date_range = st.date_input(
-        "Filter by Service Date (Last 10 Years)",
-        value=(default_start_date, max_date),
-        min_value=min_date,
-        max_value=max_date,
-    )
-
-    # date_input for range returns a tuple
-    if isinstance(date_range, tuple):
-        start_date, end_date = date_range
+    if tx_valid.empty:
+        st.info("No valid transaction dates available.")
     else:
-        start_date, end_date = date_range, max_date
+        min_tx = tx_valid["FROMDATE"].min()
+        max_tx = tx_valid["FROMDATE"].max()
 
-    mask = (transactions["FROMDATE"].dt.date >= start_date) & (
-        transactions["FROMDATE"].dt.date <= end_date
-    )
-    tx_filtered = transactions[mask].copy()
+        ten_years_ago = max_tx - pd.DateOffset(years=10)
+        default_start = max(min_tx, ten_years_ago)
 
-    # group by service date and sum AMOUNT
-    exposure_by_date = (
-        tx_filtered.assign(ServiceDate=tx_filtered["FROMDATE"].dt.date)
-        .groupby("ServiceDate", as_index=False)["AMOUNT"]
-        .sum()
-    )
+        min_date = min_tx.date()
+        max_date = max_tx.date()
+        default_start_date = default_start.date()
 
-    if not exposure_by_date.empty:
-        fig_exposure = px.line(
-            exposure_by_date,
-            x="ServiceDate",
-            y="AMOUNT",
-            title="Total Financial Exposure over Time",
-            labels={
-                "ServiceDate": "Service Date",
-                "AMOUNT": "Exposure (Sum of AMOUNT)",
-            },
+        date_range = st.date_input(
+            "Filter by Service Date (Last 10 Years)",
+            value=(default_start_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
         )
-        st.plotly_chart(fig_exposure, use_container_width=True)
-    else:
-        st.info("No transactions found in this date range.")
 
-    total_exposure = tx_filtered["AMOUNT"].sum()
-    st.markdown(
-        f"**Total Exposure in selected period:** ${total_exposure:,.2f}"
-    )
-    st.caption(
-        "Exposure = Sum of AMOUNT from claims_transactions_filtered for filtered claim lines."
-    )
+        if isinstance(date_range, tuple):
+            start_date, end_date = date_range
+        else:
+            start_date, end_date = date_range, max_date
+
+        mask = (tx_valid["FROMDATE"].dt.date >= start_date) & (
+            tx_valid["FROMDATE"].dt.date <= end_date
+        )
+        tx_filtered = tx_valid[mask].copy()
+
+        exposure_by_date = (
+            tx_filtered.assign(ServiceDate=tx_filtered["FROMDATE"].dt.date)
+            .groupby("ServiceDate", as_index=False)["AMOUNT"]
+            .sum()
+        )
+
+        if not exposure_by_date.empty:
+            fig_exposure = px.line(
+                exposure_by_date,
+                x="ServiceDate",
+                y="AMOUNT",
+                title="Total Financial Exposure over Time",
+                labels={
+                    "ServiceDate": "Service Date",
+                    "AMOUNT": "Exposure (Sum of AMOUNT)",
+                },
+            )
+            st.plotly_chart(fig_exposure, use_container_width=True)
+        else:
+            st.info("No transactions found in this date range.")
+
+        total_exposure = tx_filtered["AMOUNT"].sum()
+        st.markdown(
+            f"**Total Exposure in selected period:** ${total_exposure:,.2f}"
+        )
+        st.caption(
+            "Exposure = Sum of AMOUNT from claims_transactions_filtered for filtered claim lines."
+        )
 
     st.markdown("---")
 
-    # ---------- Existing claims status / payer filters (bottom section) ----------
-    st.subheader("Claims by Status and Payer")
+    # ---------- Bottom: claims status & payer ----------
+    st.markdown("### Claims by Status and Payer")
 
     status_list = claims["STATUS"].dropna().unique()
     payer_list = claims["PAYER"].dropna().unique()
@@ -290,10 +323,9 @@ with tabs[3]:
     with col4:
         kpi_card("Payers", total_payers, "#f72e2e")
 
-
-# ------------------------------------------------------------------
-# DENIAL REASONS TAB (ILLUSTRATIVE)
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
+# DENIAL REASONS TAB (illustrative counts)
+# -----------------------------------------------------------
 with tabs[4]:
     st.subheader("Explore top denial reasons (illustrative example).")
 
@@ -332,9 +364,9 @@ with tabs[4]:
     with col4:
         kpi_card("Payers", total_payers, "#f72e2e")
 
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 # PAYERS TAB
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 with tabs[5]:
     st.subheader("See distribution of payers involved in claims.")
 
@@ -356,9 +388,9 @@ with tabs[5]:
     with col4:
         kpi_card("Payers", total_payers, "#f72e2e")
 
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 # PREDICT DENIAL TAB
-# ------------------------------------------------------------------
+# -----------------------------------------------------------
 with tabs[6]:
     st.subheader("Predict Claim Denial")
 
@@ -406,8 +438,8 @@ with tabs[6]:
         )
 
         st.caption(
-            f"Threshold used: {threshold:.1f}%. Historical denial rate for this payer is "
-            f"{payer_rate:.2f}%, based on claims with any outstanding patient balance."
+            f"Threshold used: {threshold:.1f}%. Historical denial rate for this payer "
+            f"is {payer_rate:.2f}%, based on claims with any outstanding patient balance."
         )
 
         st.info(
